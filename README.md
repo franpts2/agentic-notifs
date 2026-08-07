@@ -25,7 +25,7 @@ No prompts, transcripts, source code, or Git data leave your machine. The app ac
 - Node.js 18 or newer for development tests
 - Ghostty and/or Zed; install Zed's CLI for the best project focusing behavior
 
-Install Zed's CLI from `Cmd+Shift+P` > `cli: install cli binary`. Agentic Notifs falls back to `open -a Zed <project>` when the CLI is unavailable.
+Install Zed's CLI from `Cmd+Shift+P` > `cli: install cli binary`. With it installed, Agentic Notifs uses Zed's exact workspace matching so notification clicks cannot replace an unrelated window. It falls back to `open -a Zed <project>` when the CLI is unavailable.
 
 ## Install
 

@@ -244,6 +244,12 @@ enum AgenticNotifyCLI {
             throw CLIError.selfTestFailed("activity-only event filtering")
         }
 
+        guard ConversationLaunchPolicy.zedArguments(projectPath: "/tmp/project")
+            == ["--classic", "/tmp/project"]
+        else {
+            throw CLIError.selfTestFailed("safe Zed workspace matching")
+        }
+
         print("All self-tests passed.")
     }
 

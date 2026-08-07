@@ -835,7 +835,7 @@ private enum ConversationLauncher {
         if let executable = zedExecutable() {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = [expandedPath]
+            process.arguments = ConversationLaunchPolicy.zedArguments(projectPath: expandedPath)
             do {
                 try process.run()
                 process.waitUntilExit()
