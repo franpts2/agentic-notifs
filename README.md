@@ -14,7 +14,7 @@ Supported agents:
 2. Small adapters forward lifecycle events to the local `agentic-notify` CLI.
 3. Events are normalized into live session state and actionable notification events.
 4. A native menu-bar widget shows each active agent as `Running`, `Ready`, `Waiting for answer`, `Approval`, or `Error`, with its session title.
-5. Clicking a notification returns to Ghostty or the corresponding Zed project, based on where the agent is running.
+5. Clicking a notification returns to Ghostty or the originating Zed window, based on where the agent is running.
 
 No prompts, transcripts, source code, or Git data leave your machine. The app accepts project paths, session titles, and lifecycle metadata only.
 
@@ -122,7 +122,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change. Security issu
 
 ## Current Limitation
 
-Ghostty and Zed do not expose a public API for selecting an exact terminal tab. Notification clicks activate Ghostty or focus the Zed project workspace without Accessibility automation.
+Ghostty and Zed do not expose a public API for selecting an exact terminal tab. Agentic Notifs remembers the native Zed window where each turn starts and focuses it directly; if that window has closed, it falls back to the matching project workspace. Multiple agent terminals inside the same Zed window still cannot be distinguished.
 
 Live states and session titles are kept in memory. After the menu-bar app restarts, active processes and OpenCode session titles are detected immediately.
 

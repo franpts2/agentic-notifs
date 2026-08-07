@@ -1,5 +1,8 @@
 import AgenticNotifsCore
 import AppKit
+import ApplicationServices
+import CoreGraphics
+import Darwin
 import Foundation
 import ObjectiveC
 
@@ -97,10 +100,15 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
         notification.title = event.sessionName ?? event.projectName
         notification.informativeText = event.message ?? event.kind.defaultMessage
         notification.soundName = NSUserNotificationDefaultSoundName
-        var userInfo = ["projectPath": event.projectPath]
+        var userInfo: [String: Any] = ["projectPath": event.projectPath]
         let identity = "\(event.agent.rawValue):\(event.sessionID ?? event.projectPath)"
-        if let hostApp = event.hostApp ?? activities[identity]?.hostApp {
+        let activity = activities[identity]
+        if let hostApp = event.hostApp ?? activity?.hostApp {
             userInfo["hostApp"] = hostApp.rawValue
+        }
+        if let hostWindow = activity?.hostWindow {
+            userInfo["hostProcessID"] = NSNumber(value: hostWindow.processID)
+            userInfo["hostWindowID"] = NSNumber(value: hostWindow.windowID)
         }
         notification.userInfo = userInfo
 
@@ -146,16 +154,22 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
                 projectPath: event.projectPath,
                 sessionName: event.sessionName ?? previousActivity.sessionName,
                 hostApp: event.hostApp ?? previousActivity.hostApp,
+                hostWindow: previousActivity.hostWindow,
                 updatedAt: previousActivity.updatedAt
             )
         } else if let state = AgentActivity.State(eventKind: event.kind) {
+            let hostApp = event.hostApp ?? previousActivity?.hostApp
+            let hostWindow = event.kind == .running && hostApp == .zed
+                ? (ZedWindowController.frontmostWindow() ?? previousActivity?.hostWindow)
+                : previousActivity?.hostWindow
             activities[identity] = AgentActivity(
                 agent: event.agent,
                 state: state,
                 projectName: event.projectName,
                 projectPath: event.projectPath,
                 sessionName: event.sessionName ?? previousActivity?.sessionName,
-                hostApp: event.hostApp ?? previousActivity?.hostApp,
+                hostApp: hostApp,
+                hostWindow: hostWindow,
                 updatedAt: Date()
             )
             scanMissCounts.removeValue(forKey: identity)
@@ -217,7 +231,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
                     item.target = self
                     item.representedObject = ConversationTarget(
                         projectPath: projectPath,
-                        hostApp: activity.hostApp
+                        hostApp: activity.hostApp,
+                        hostWindow: activity.hostWindow
                     )
                 }
                 item.image = coloredSymbol(
@@ -314,6 +329,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
                 projectPath: activity.projectPath,
                 sessionName: activity.sessionName ?? matchingProcess.sessionName,
                 hostApp: activity.hostApp ?? matchingProcess.hostApp,
+                hostWindow: activity.hostWindow,
                 updatedAt: activity.updatedAt
             )
             matchedProcessIDs.insert(matchingProcess.processID)
@@ -334,6 +350,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
                 projectPath: process.projectPath ?? existingActivity?.projectPath,
                 sessionName: process.sessionName ?? existingActivity?.sessionName,
                 hostApp: process.hostApp ?? existingActivity?.hostApp,
+                hostWindow: existingActivity?.hostWindow,
                 updatedAt: existingActivity?.updatedAt ?? Date()
             )
             unmatchedActivityIDs.remove(identity)
@@ -373,7 +390,11 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
             return
         }
         DispatchQueue.global(qos: .userInitiated).async {
-            ConversationLauncher.open(projectPath: target.projectPath, hostApp: target.hostApp)
+            ConversationLauncher.open(
+                projectPath: target.projectPath,
+                hostApp: target.hostApp,
+                hostWindow: target.hostWindow
+            )
         }
     }
 
@@ -402,8 +423,19 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
 
     nonisolated private func openNotification(path: String, userInfo: [AnyHashable: Any]) {
         let hostApp = (userInfo["hostApp"] as? String).flatMap(AgentHostApp.init(rawValue:))
+        let hostWindow: ZedWindowTarget?
+        if let processID = (userInfo["hostProcessID"] as? NSNumber)?.int32Value,
+           let windowID = (userInfo["hostWindowID"] as? NSNumber)?.uint32Value {
+            hostWindow = ZedWindowTarget(processID: processID, windowID: windowID)
+        } else {
+            hostWindow = nil
+        }
         DispatchQueue.global(qos: .userInitiated).async {
-            ConversationLauncher.open(projectPath: path, hostApp: hostApp)
+            ConversationLauncher.open(
+                projectPath: path,
+                hostApp: hostApp,
+                hostWindow: hostWindow
+            )
         }
     }
 }
@@ -411,6 +443,12 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
 private struct ConversationTarget {
     let projectPath: String
     let hostApp: AgentHostApp?
+    let hostWindow: ZedWindowTarget?
+}
+
+private struct ZedWindowTarget {
+    let processID: pid_t
+    let windowID: CGWindowID
 }
 
 private struct AgentActivity {
@@ -420,6 +458,7 @@ private struct AgentActivity {
     let projectPath: String?
     let sessionName: String?
     let hostApp: AgentHostApp?
+    let hostWindow: ZedWindowTarget?
     let updatedAt: Date
 
     var displayName: String {
@@ -818,8 +857,19 @@ private extension AgentName {
 }
 
 private enum ConversationLauncher {
-    nonisolated static func open(projectPath: String, hostApp: AgentHostApp?) {
+    nonisolated static func open(
+        projectPath: String,
+        hostApp: AgentHostApp?,
+        hostWindow: ZedWindowTarget?
+    ) {
         let expandedPath = NSString(string: projectPath).expandingTildeInPath
+
+        if hostApp == .zed,
+           let hostWindow,
+           ZedWindowController.focus(target: hostWindow) {
+            return
+        }
+
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: expandedPath, isDirectory: &isDirectory),
               isDirectory.boolValue
@@ -868,5 +918,115 @@ private enum ConversationLauncher {
             "\(home)/.local/bin/zed"
         ]
         return candidates.first(where: FileManager.default.isExecutableFile(atPath:))
+    }
+}
+
+@_silgen_name("GetProcessForPID")
+private func legacyGetProcessForPID(
+    _ processID: pid_t,
+    _ processSerialNumber: UnsafeMutablePointer<ProcessSerialNumber>
+) -> OSStatus
+
+private enum ZedWindowController {
+    private static let bundleIdentifier = "dev.zed.Zed"
+    private static let skyLightPath = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight"
+
+    nonisolated static func frontmostWindow() -> ZedWindowTarget? {
+        guard let application = NSWorkspace.shared.frontmostApplication,
+              application.bundleIdentifier == bundleIdentifier
+        else {
+            return nil
+        }
+
+        return windows().first(where: { window in
+            (window[kCGWindowOwnerPID as String] as? pid_t) == application.processIdentifier
+                && (window[kCGWindowLayer as String] as? Int) == 0
+                && (window[kCGWindowAlpha as String] as? Double ?? 0) > 0
+                && (window[kCGWindowIsOnscreen as String] as? Bool) == true
+                && windowArea(window) > 10_000
+        }).flatMap { window in
+            guard let windowID = window[kCGWindowNumber as String] as? CGWindowID else {
+                return nil
+            }
+            return ZedWindowTarget(processID: application.processIdentifier, windowID: windowID)
+        }
+    }
+
+    nonisolated static func focus(target: ZedWindowTarget) -> Bool {
+        guard let window = windows().first(where: {
+            ($0[kCGWindowNumber as String] as? CGWindowID) == target.windowID
+        }), (window[kCGWindowOwnerPID as String] as? pid_t) == target.processID,
+        NSRunningApplication(processIdentifier: target.processID)?.bundleIdentifier == bundleIdentifier,
+        let handle = dlopen(skyLightPath, RTLD_LAZY)
+        else {
+            return false
+        }
+        defer { dlclose(handle) }
+
+        typealias FocusWindow = @convention(c) (
+            UnsafeMutablePointer<ProcessSerialNumber>,
+            CGWindowID,
+            UInt32
+        ) -> CGError
+        typealias PostEvent = @convention(c) (
+            UnsafeMutablePointer<ProcessSerialNumber>,
+            UnsafeMutablePointer<UInt8>
+        ) -> CGError
+        guard let focusSymbol = dlsym(handle, "_SLPSSetFrontProcessWithOptions"),
+              let eventSymbol = dlsym(handle, "SLPSPostEventRecordTo")
+        else {
+            return false
+        }
+
+        let focusWindow = unsafeBitCast(focusSymbol, to: FocusWindow.self)
+        let postEvent = unsafeBitCast(eventSymbol, to: PostEvent.self)
+        var processSerialNumber = ProcessSerialNumber()
+        guard legacyGetProcessForPID(target.processID, &processSerialNumber) == noErr,
+              focusWindow(&processSerialNumber, target.windowID, 0x200) == .success
+        else {
+            return false
+        }
+
+        return makeKeyWindow(
+            target.windowID,
+            processSerialNumber: &processSerialNumber,
+            postEvent: postEvent
+        )
+    }
+
+    nonisolated private static func windows() -> [[String: Any]] {
+        CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+    }
+
+    nonisolated private static func windowArea(_ window: [String: Any]) -> Double {
+        guard let bounds = window[kCGWindowBounds as String] as? [String: Any],
+              let width = bounds["Width"] as? Double,
+              let height = bounds["Height"] as? Double
+        else {
+            return 0
+        }
+        return width * height
+    }
+
+    nonisolated private static func makeKeyWindow(
+        _ windowID: CGWindowID,
+        processSerialNumber: inout ProcessSerialNumber,
+        postEvent: (UnsafeMutablePointer<ProcessSerialNumber>, UnsafeMutablePointer<UInt8>) -> CGError
+    ) -> Bool {
+        var windowID = windowID
+        var point = CGPoint(x: 300_000, y: 300_000)
+        var event = [UInt8](repeating: 0, count: 0x100)
+        // Window Server mouse-down record targeted outside the window's content.
+        event[0x04] = 0xf8
+        event[0x08] = 0x01
+        event[0x3a] = 0x10
+        withUnsafeBytes(of: &windowID) { bytes in
+            event.replaceSubrange(0x3c..<(0x3c + bytes.count), with: bytes)
+        }
+        withUnsafeBytes(of: &point) { bytes in
+            event.replaceSubrange(0x20..<(0x20 + bytes.count), with: bytes)
+        }
+        return postEvent(&processSerialNumber, &event) == .success
     }
 }
