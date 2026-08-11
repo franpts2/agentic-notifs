@@ -956,7 +956,8 @@ private enum ZedWindowController {
         guard let window = windows().first(where: {
             ($0[kCGWindowNumber as String] as? CGWindowID) == target.windowID
         }), (window[kCGWindowOwnerPID as String] as? pid_t) == target.processID,
-        NSRunningApplication(processIdentifier: target.processID)?.bundleIdentifier == bundleIdentifier,
+        let application = NSRunningApplication(processIdentifier: target.processID),
+        application.bundleIdentifier == bundleIdentifier,
         let handle = dlopen(skyLightPath, RTLD_LAZY)
         else {
             return false
@@ -987,11 +988,15 @@ private enum ZedWindowController {
             return false
         }
 
-        return makeKeyWindow(
+        guard makeKeyWindow(
             target.windowID,
             processSerialNumber: &processSerialNumber,
             postEvent: postEvent
-        )
+        ) else {
+            return false
+        }
+
+        return application.activate(options: [.activateIgnoringOtherApps])
     }
 
     nonisolated private static func windows() -> [[String: Any]] {
