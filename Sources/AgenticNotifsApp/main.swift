@@ -5,6 +5,7 @@ import CoreGraphics
 import Darwin
 import Foundation
 import ObjectiveC
+import UserNotifications
 
 @main
 enum AgenticNotifsApplication {
@@ -43,7 +44,7 @@ private extension Bundle {
 }
 
 @MainActor
-final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate {
+final class ApplicationDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private static let completedActivityCooldown: TimeInterval = 5 * 60
 
     private var statusItem: NSStatusItem?
@@ -52,9 +53,11 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
     private var scanMissCounts: [String: Int] = [:]
     private var scanGeneration = 0
     private var activityRevision = 0
+    private var notificationAuthorizationGranted: Bool?
+    private var pendingNotificationRequests: [UNNotificationRequest] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSUserNotificationCenter.default.delegate = self
+        configureNotifications()
         installURLHandler()
         createStatusItem()
         reloadAgentStates()
@@ -65,6 +68,29 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
             forEventClass: AEEventClass(kInternetEventClass),
             andEventID: AEEventID(kAEGetURL)
         )
+    }
+
+    private func configureNotifications() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        Task {
+            let granted: Bool
+            do {
+                granted = try await center.requestAuthorization(options: [.alert, .sound])
+            } catch {
+                NSLog("Could not request notification authorization: %@", error.localizedDescription)
+                granted = false
+            }
+            notificationAuthorizationGranted = granted
+            let requests = pendingNotificationRequests
+            pendingNotificationRequests.removeAll()
+            guard granted else {
+                return
+            }
+            for request in requests {
+                submitNotificationRequest(request, to: center)
+            }
+        }
     }
 
     private func installURLHandler() {
@@ -98,10 +124,10 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
     }
 
     private func deliverNotification(_ event: AgentEvent) {
-        let notification = NSUserNotification()
-        notification.title = event.sessionName ?? event.projectName
-        notification.informativeText = event.message ?? event.kind.defaultMessage
-        notification.soundName = NSUserNotificationDefaultSoundName
+        let content = UNMutableNotificationContent()
+        content.title = event.sessionName ?? event.projectName
+        content.body = event.message ?? event.kind.defaultMessage
+        content.sound = .default
         var userInfo: [String: Any] = ["projectPath": event.projectPath]
         let identity = "\(event.agent.rawValue):\(event.sessionID ?? event.projectPath)"
         let activity = activities[identity]
@@ -112,17 +138,32 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
             userInfo["hostProcessID"] = NSNumber(value: hostWindow.processID)
             userInfo["hostWindowID"] = NSNumber(value: hostWindow.windowID)
         }
-        notification.userInfo = userInfo
-
-        // Notification Center otherwise keeps using its placeholder identity image.
-        if let icon = NSApplication.shared.applicationIconImage {
-            notification.setValue(icon, forKey: "_identityImage")
-            notification.setValue(false, forKey: "_identityImageHasBorder")
-        }
+        content.userInfo = userInfo
 
         let sessionComponent = event.sessionID ?? UUID().uuidString
-        notification.identifier = "\(event.agent.rawValue):\(sessionComponent):\(event.kind.rawValue):\(UUID().uuidString)"
-        NSUserNotificationCenter.default.deliver(notification)
+        let identifier = "\(event.agent.rawValue):\(sessionComponent):\(event.kind.rawValue):\(UUID().uuidString)"
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+        guard let notificationAuthorizationGranted else {
+            pendingNotificationRequests.append(request)
+            return
+        }
+        guard notificationAuthorizationGranted else {
+            return
+        }
+        submitNotificationRequest(request, to: UNUserNotificationCenter.current())
+    }
+
+    private func submitNotificationRequest(
+        _ request: UNNotificationRequest,
+        to center: UNUserNotificationCenter
+    ) {
+        Task {
+            do {
+                try await center.add(request)
+            } catch {
+                NSLog("Could not deliver notification: %@", error.localizedDescription)
+            }
+        }
     }
 
     private func createStatusItem() {
@@ -415,24 +456,31 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
     }
 
     nonisolated func userNotificationCenter(
-        _ center: NSUserNotificationCenter,
-        shouldPresent notification: NSUserNotification
-    ) -> Bool {
-        true
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .list, .sound]
     }
 
     nonisolated func userNotificationCenter(
-        _ center: NSUserNotificationCenter,
-        didActivate notification: NSUserNotification
-    ) {
-        guard let path = notification.userInfo?["projectPath"] as? String else {
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        let notification = response.notification
+        let userInfo = notification.request.content.userInfo
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+              let path = userInfo["projectPath"] as? String
+        else {
             return
         }
-        openNotification(path: path, userInfo: notification.userInfo ?? [:])
-        center.removeDeliveredNotification(notification)
+        openNotification(path: path, userInfo: userInfo)
+        center.removeDeliveredNotifications(withIdentifiers: [notification.request.identifier])
     }
 
-    nonisolated private func openNotification(path: String, userInfo: [AnyHashable: Any]) {
+    nonisolated private func openNotification(
+        path: String,
+        userInfo: [AnyHashable: Any]
+    ) {
         let hostApp = (userInfo["hostApp"] as? String).flatMap(AgentHostApp.init(rawValue:))
         let hostWindow: ZedWindowTarget?
         if let processID = (userInfo["hostProcessID"] as? NSNumber)?.int32Value,
