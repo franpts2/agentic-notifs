@@ -71,7 +71,7 @@ Click the notification to return to the terminal app where the agent is running.
 
 The menu-bar item always shows the number of active top-level agents. Open its menu to see every session as `<session title> · <agent>`, with a colored leading icon representing its state. OpenCode titles are read from its local session database during process scans; Claude Code and Codex fall back to the project name when their hooks do not provide one. Selecting a row returns to the app hosting that session.
 
-`Running` starts when an agent begins a turn. `Ready` means the turn finished and the session is still open. `Waiting for answer` uses a question-bubble icon when the agent asks a question. Question, approval, and error states remain visible until that session continues or ends.
+`Running` starts when an agent begins a turn. `Ready` means the turn finished and remains visible for five minutes after the last update. `Waiting for answer` uses a question-bubble icon when the agent asks a question. Question, approval, and error states remain visible until that session continues or ends.
 
 At launch, the app detects each interactive top-level agent process, resolves its working directory, and labels it `Active` until a lifecycle event supplies a more precise state. Background helpers and subagents are excluded. Choose **Reload Agent States** from the menu, or press `R` while it is open, to scan again. Failed or incomplete scans preserve the current rows, and a missing session must be absent from two successful scans before it is removed.
 

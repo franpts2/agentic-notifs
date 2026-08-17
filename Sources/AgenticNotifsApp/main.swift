@@ -44,6 +44,8 @@ private extension Bundle {
 
 @MainActor
 final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotificationCenterDelegate {
+    private static let completedActivityCooldown: TimeInterval = 5 * 60
+
     private var statusItem: NSStatusItem?
     private let statusMenu = NSMenu()
     private var activities: [String: AgentActivity] = [:]
@@ -162,6 +164,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
             let hostWindow = event.kind == .running && hostApp == .zed
                 ? (ZedWindowController.frontmostWindow() ?? previousActivity?.hostWindow)
                 : previousActivity?.hostWindow
+            let updatedAt = Date()
             activities[identity] = AgentActivity(
                 agent: event.agent,
                 state: state,
@@ -170,15 +173,23 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSUserNotifica
                 sessionName: event.sessionName ?? previousActivity?.sessionName,
                 hostApp: hostApp,
                 hostWindow: hostWindow,
-                updatedAt: Date()
+                updatedAt: updatedAt
             )
             scanMissCounts.removeValue(forKey: identity)
+            if state == .ready {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.completedActivityCooldown) { [weak self] in
+                    self?.refreshStatusItem()
+                }
+            }
         }
         refreshStatusItem()
     }
 
     private func refreshStatusItem() {
-        let sortedActivities = activities.sorted {
+        let completedActivityCutoff = Date().addingTimeInterval(-Self.completedActivityCooldown)
+        let sortedActivities = activities.filter { _, activity in
+            activity.state != .ready || activity.updatedAt > completedActivityCutoff
+        }.sorted {
             if $0.value.state.priority != $1.value.state.priority {
                 return $0.value.state.priority > $1.value.state.priority
             }
